@@ -3,6 +3,8 @@ import math
 import csv
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+import pandas as pd
 import requests
 import yfinance as yf
 
@@ -17,8 +19,8 @@ TICKERS = [
     "SATL","IBRX","VG","PRME","ATAI","TMDX"
 ]
 
-NEAR_MA200_PCT = 2.0          # 0..+2% = “cerca de perder MA200”
-BREAKOUT_LOOKBACK = 63        # ~3 meses bursátiles
+NEAR_MA200_PCT = 2.0
+BREAKOUT_LOOKBACK = 63
 ATR_PERIOD = 14
 MAX_TG_LEN = 3800
 HISTORY_PATH = "data/history.csv"
@@ -78,8 +80,7 @@ def _safe_round(x, nd=2):
 
 # ---------- Indicators ----------
 def compute_atr_pct(df, period=14):
-    # ATR = EMA/SMA de True Range. Aquí SMA simple.
-    # atr% = ATR / Close * 100
+    # ATR (SMA) del True Range; atr% = ATR / Close * 100
     if df is None or df.empty or "High" not in df or "Low" not in df or "Close" not in df:
         return None
     if len(df) < period + 2:
@@ -90,20 +91,22 @@ def compute_atr_pct(df, period=14):
     close = df["Close"]
 
     prev_close = close.shift(1)
+
     tr1 = (high - low).abs()
     tr2 = (high - prev_close).abs()
     tr3 = (low - prev_close).abs()
-    tr = tr1.combine(tr2, max).combine(tr3, max)
+
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
     atr = tr.rolling(period).mean().iloc[-1]
     atr = _to_float_or_none(atr)
     c = _to_float_or_none(close.iloc[-1])
+
     if atr is None or c is None or c == 0:
         return None
     return (atr / c) * 100.0
 
 def compute_drawdown_pct(df, lookback=63):
-    # drawdown desde máximo del lookback hasta el último close
     if df is None or df.empty or "Close" not in df:
         return None
     if len(df) < lookback:
@@ -160,10 +163,9 @@ def analyze_ticker(ticker: str):
 
     atr_pct = compute_atr_pct(df, ATR_PERIOD)
     dd_3m = compute_drawdown_pct(df, BREAKOUT_LOOKBACK)
-    ret_1m = compute_return_pct(df, 21)   # ~1 mes
-    ret_3m = compute_return_pct(df, 63)   # ~3 meses
+    ret_1m = compute_return_pct(df, 21)
+    ret_3m = compute_return_pct(df, 63)
 
-    # Score 0-100 (base)
     score = 0
     if ma200 and close > ma200: score += 35
     if ma50 and close > ma50: score += 20
@@ -201,7 +203,6 @@ def load_last_snapshot():
     try:
         with open(HISTORY_PATH, "r", newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
-            # Leemos todo pero nos quedamos con la última fila por ticker
             for row in reader:
                 t = row.get("ticker")
                 if not t:
@@ -252,9 +253,7 @@ def clamp(x, lo=0.0, hi=100.0):
     return max(lo, min(hi, x))
 
 def exposure_continuous(pct_over_ma200, pct_ma50_over_ma200, avg_score, n_alerts, n_total):
-    # Exposición 0-100 “continua”
     base = 0.55 * pct_over_ma200 + 0.35 * pct_ma50_over_ma200 + 0.10 * avg_score
-    # Penaliza alertas (más agresivo si muchas)
     if n_total > 0:
         alert_ratio = n_alerts / n_total
         base -= 35.0 * alert_ratio
@@ -286,13 +285,9 @@ def main():
         send_telegram("⚠️ Informe diario: no pude descargar/interpretar datos para ningún ticker.")
         return
 
-    # Carga histórico previo para deltas
     prev = load_last_snapshot()
-
-    # Append histórico del día
     append_history(today, rows)
 
-    # Agregados
     over200 = [r for r in rows if r["ma200"] and r["close"] > r["ma200"]]
     under200 = [r for r in rows if r["ma200"] and r["close"] < r["ma200"]]
     ma50_over200 = [r for r in rows if r["ma50_gt_ma200"]]
@@ -303,11 +298,10 @@ def main():
     pct_ma50_over200 = 100.0 * len(ma50_over200) / len(rows)
     avg_score = sum(r["score"] for r in rows) / len(rows)
 
-    # Alertas y listas de acción
     alerts = []
-    reduce = []   # recortar
-    watch = []    # vigilar
-    opp = []      # oportunidades
+    reduce = []
+    watch = []
+    opp = []
 
     for r in rows:
         t = r["ticker"]
@@ -324,7 +318,6 @@ def main():
         if r["breakout_3m"]:
             alerts.append(f"🚀 {t} ruptura 3M")
 
-        # Acciones sugeridas (semi-cuanti: tú decides)
         if below200 and ma50lt200:
             reduce.append(t)
         elif d200 is not None and 0 <= d200 <= 5:
@@ -332,12 +325,9 @@ def main():
         if r["breakout_3m"] and r["ma50_gt_ma200"] and (r["ma200"] and r["close"] > r["ma200"]):
             opp.append(t)
 
-    # Exposición recomendada (continua)
     exposure = exposure_continuous(pct_over200, pct_ma50_over200, avg_score, len(alerts), len(rows))
     regime = regime_text(pct_over200, pct_ma50_over200, avg_score)
 
-    # Deltas vs último snapshot (si existe)
-    # Construimos cambios de score y dist200 para top movers
     movers = []
     for r in rows:
         t = r["ticker"]
@@ -348,41 +338,32 @@ def main():
                 prev_d200 = float(prev_row.get("dist_ma200_pct", "nan"))
             except Exception:
                 continue
-            if not math.isnan(prev_score):
-                ds = r["score"] - prev_score
-            else:
-                ds = 0
-            if not math.isnan(prev_d200) and r["dist_ma200_pct"] is not None:
-                dd = r["dist_ma200_pct"] - prev_d200
-            else:
-                dd = None
+
+            ds = r["score"] - prev_score if not math.isnan(prev_score) else 0.0
+            dd = (r["dist_ma200_pct"] - prev_d200) if (not math.isnan(prev_d200) and r["dist_ma200_pct"] is not None) else None
             movers.append((t, ds, dd))
     movers_sorted = sorted(movers, key=lambda x: abs(x[1]), reverse=True)[:8]
 
-    # Rankings
     top = sorted(rows, key=lambda x: x["score"], reverse=True)[:6]
     bottom = sorted(rows, key=lambda x: x["score"])[:6]
 
-    # Ficha ampliada para top/bottom
-    def ficha(r):
-        d200 = r["dist_ma200_pct"]
-        d50 = r["dist_ma50_pct"]
-        return (
-            f"- {r['ticker']} | score {r['score']}/100"
-            f" | vs MA200 {d200:+.1f}%" if d200 is not None else f"- {r['ticker']} | score {r['score']}/100 | vs MA200 n/a"
-        )
-
-    def ficha2(r):
+    def ficha_line(r):
         d200 = r["dist_ma200_pct"]
         d50 = r["dist_ma50_pct"]
         atr = r["atr_pct"]
         dd = r["dd_3m_pct"]
         r1m = r["ret_1m_pct"]
         r3m = r["ret_3m_pct"]
+
         flags = []
-        if r["ma50_gt_ma200"]: flags.append("MA50>MA200")
-        else: flags.append("MA50<MA200")
-        if r["breakout_3m"]: flags.append("Breakout3M")
+        flags.append("MA50>MA200" if r["ma50_gt_ma200"] else "MA50<MA200")
+        if r["breakout_3m"]:
+            flags.append("Breakout3M")
+
+        if None in (d200, d50, atr, dd, r1m, r3m):
+            d200s = f"{d200:+.1f}%" if d200 is not None else "n/a"
+            return f"- {r['ticker']}: score {r['score']}/100 | MA200 {d200s} | {', '.join(flags)}"
+
         return (
             f"- {r['ticker']}: score {r['score']}/100 | "
             f"MA200 {d200:+.1f}% | MA50 {d50:+.1f}% | "
@@ -391,7 +372,6 @@ def main():
             f"{', '.join(flags)}"
         )
 
-    # Mensaje técnico + estratégico (informe)
     lines = []
     lines.append(f"📊 INFORME COMPLETO ({today})")
     lines.append("")
@@ -412,42 +392,10 @@ def main():
     else:
         lines.append("- Lectura: estructura razonable; se puede ser selectivo con adds en setups fuertes.")
     lines.append("")
-
     lines.append("— Acciones sugeridas (tú decides) —")
-    if reduce:
-        lines.append(f"- Reducir/recortar (bajo MA200 + MA50<MA200): {', '.join(sorted(set(reduce)))}")
-    else:
-        lines.append("- Reducir/recortar: n/a")
-    if watch:
-        lines.append(f"- Vigilar (0%..+5% sobre MA200): {', '.join(sorted(set(watch)))}")
-    else:
-        lines.append("- Vigilar: n/a")
-    if opp:
-        lines.append(f"- Oportunidades (breakout + MA50>MA200 + sobre MA200): {', '.join(sorted(set(opp)))}")
-    else:
-        lines.append("- Oportunidades: n/a")
-    lines.append("")
-
-    lines.append("— Top 6 (ficha) —")
-    for r in top:
-        # aseguramos no None en ficha2: si falta algo, lo simplificamos
-        if None in (r["dist_ma200_pct"], r["dist_ma50_pct"], r["atr_pct"], r["dd_3m_pct"], r["ret_1m_pct"], r["ret_3m_pct"]):
-            # fallback breve
-            d200 = r["dist_ma200_pct"]
-            d200s = f"{d200:+.1f}%" if d200 is not None else "n/a"
-            lines.append(f"- {r['ticker']}: score {r['score']}/100 | vs MA200 {d200s}")
-        else:
-            lines.append(ficha2(r))
-
-    lines.append("")
-    lines.append("— Bottom 6 (ficha) —")
-    for r in bottom:
-        if None in (r["dist_ma200_pct"], r["dist_ma50_pct"], r["atr_pct"], r["dd_3m_pct"], r["ret_1m_pct"], r["ret_3m_pct"]):
-            d200 = r["dist_ma200_pct"]
-            d200s = f"{d200:+.1f}%" if d200 is not None else "n/a"
-            lines.append(f"- {r['ticker']}: score {r['score']}/100 | vs MA200 {d200s}")
-        else:
-            lines.append(ficha2(r))
+    lines.append(f"- Reducir/recortar (bajo MA200 + MA50<MA200): {', '.join(sorted(set(reduce))) if reduce else 'n/a'}")
+    lines.append(f"- Vigilar (0%..+5% sobre MA200): {', '.join(sorted(set(watch))) if watch else 'n/a'}")
+    lines.append(f"- Oportunidades (breakout + MA50>MA200 + sobre MA200): {', '.join(sorted(set(opp))) if opp else 'n/a'}")
 
     if movers_sorted:
         lines.append("")
@@ -457,6 +405,16 @@ def main():
             sign = "+" if ds >= 0 else ""
             lines.append(f"- {t}: Δscore {sign}{ds:.0f}{dd_txt}")
 
+    lines.append("")
+    lines.append("— Top 6 (ficha) —")
+    for r in top:
+        lines.append(ficha_line(r))
+
+    lines.append("")
+    lines.append("— Bottom 6 (ficha) —")
+    for r in bottom:
+        lines.append(ficha_line(r))
+
     if failed:
         lines.append("")
         lines.append("— Sin datos / error —")
@@ -464,7 +422,6 @@ def main():
 
     send_telegram("\n".join(lines))
 
-    # Mensaje 2: alertas separadas (solo si hay)
     if alerts:
         send_telegram("🚨 ALERTAS\n\n" + "\n".join(alerts))
 
