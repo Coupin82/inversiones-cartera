@@ -19,16 +19,16 @@ TICKERS = [
     "SATL","IBRX","VG","PRME","ATAI","TMDX"
 ]
 
-NEAR_MA200_PCT = 2.0
-BREAKOUT_LOOKBACK = 63
+NEAR_MA200_PCT = 2.0          # 0..+2% = “cerca de perder MA200”
+BREAKOUT_LOOKBACK = 63        # ~3 meses bursátiles
 ATR_PERIOD = 14
-MAX_TG_LEN = 3800
+MAX_TG_LEN = 3800             # margen bajo 4096
 HISTORY_PATH = "data/history.csv"
 TZ = ZoneInfo("Europe/Madrid")
 # ====================
 
 
-# ---------- Telegram ----------
+# ---------- Telegram (Markdown + chunking) ----------
 def send_telegram(text: str) -> None:
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         raise RuntimeError("Faltan TELEGRAM_TOKEN o TELEGRAM_CHAT_ID en secrets.")
@@ -47,7 +47,12 @@ def send_telegram(text: str) -> None:
     chunks.append(s)
 
     for ch in chunks:
-        payload = {"chat_id": chat_id, "text": ch, "disable_web_page_preview": True}
+        payload = {
+            "chat_id": chat_id,
+            "text": ch,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True
+        }
         r = requests.post(url, json=payload, timeout=30)
         if r.status_code != 200:
             raise RuntimeError(f"Telegram error {r.status_code}: {r.text}")
@@ -77,6 +82,9 @@ def _pct(a, b):
 def _safe_round(x, nd=2):
     return None if x is None else round(x, nd)
 
+def clamp(x, lo=0.0, hi=100.0):
+    return max(lo, min(hi, x))
+
 
 # ---------- Indicators ----------
 def compute_atr_pct(df, period=14):
@@ -89,24 +97,24 @@ def compute_atr_pct(df, period=14):
     high = df["High"]
     low = df["Low"]
     close = df["Close"]
-
     prev_close = close.shift(1)
 
     tr1 = (high - low).abs()
     tr2 = (high - prev_close).abs()
     tr3 = (low - prev_close).abs()
 
+    # True Range robusto (evita .combine(max) y problemas con Series/MultiIndex)
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
     atr = tr.rolling(period).mean().iloc[-1]
     atr = _to_float_or_none(atr)
     c = _to_float_or_none(close.iloc[-1])
-
     if atr is None or c is None or c == 0:
         return None
     return (atr / c) * 100.0
 
 def compute_drawdown_pct(df, lookback=63):
+    # drawdown desde el máximo del lookback hasta el último close
     if df is None or df.empty or "Close" not in df:
         return None
     if len(df) < lookback:
@@ -163,13 +171,16 @@ def analyze_ticker(ticker: str):
 
     atr_pct = compute_atr_pct(df, ATR_PERIOD)
     dd_3m = compute_drawdown_pct(df, BREAKOUT_LOOKBACK)
-    ret_1m = compute_return_pct(df, 21)
-    ret_3m = compute_return_pct(df, 63)
+    ret_1m = compute_return_pct(df, 21)   # ~1 mes
+    ret_3m = compute_return_pct(df, 63)   # ~3 meses
 
+    ma50_gt_ma200 = (ma50 is not None and ma200 is not None and ma50 > ma200)
+
+    # Score 0-100
     score = 0
     if ma200 and close > ma200: score += 35
     if ma50 and close > ma50: score += 20
-    if ma50 and ma200 and ma50 > ma200: score += 20
+    if ma50_gt_ma200: score += 20
     if breakout_3m: score += 25
     score = min(score, 100)
 
@@ -180,7 +191,7 @@ def analyze_ticker(ticker: str):
         "ma200": ma200,
         "dist_ma50_pct": dist_ma50,
         "dist_ma200_pct": dist_ma200,
-        "ma50_gt_ma200": (ma50 is not None and ma200 is not None and ma50 > ma200),
+        "ma50_gt_ma200": ma50_gt_ma200,
         "breakout_3m": breakout_3m,
         "atr_pct": atr_pct,
         "dd_3m_pct": dd_3m,
@@ -205,9 +216,8 @@ def load_last_snapshot():
             reader = csv.DictReader(f)
             for row in reader:
                 t = row.get("ticker")
-                if not t:
-                    continue
-                last_by_ticker[t] = row
+                if t:
+                    last_by_ticker[t] = row
     except Exception:
         return {}
     return last_by_ticker
@@ -249,10 +259,8 @@ def append_history(date_str: str, rows: list[dict]):
 
 
 # ---------- Strategy helpers ----------
-def clamp(x, lo=0.0, hi=100.0):
-    return max(lo, min(hi, x))
-
 def exposure_continuous(pct_over_ma200, pct_ma50_over_ma200, avg_score, n_alerts, n_total):
+    # Exposición 0-100 “continua”
     base = 0.55 * pct_over_ma200 + 0.35 * pct_ma50_over_ma200 + 0.10 * avg_score
     if n_total > 0:
         alert_ratio = n_alerts / n_total
@@ -267,6 +275,47 @@ def regime_text(pct_over_ma200, pct_ma50_over_ma200, avg_score):
     if pct_over_ma200 >= 50:
         return "Mixto / lateral (exigente)"
     return "Riesgo-off (estructura dañada)"
+
+
+# ---------- Formatting (visual + table) ----------
+def ficha_line(r):
+    score = r["score"]
+    icon = "🟢" if score >= 70 else ("🟡" if score >= 40 else "🔴")
+
+    d200 = r["dist_ma200_pct"]
+    d50 = r["dist_ma50_pct"]
+    atr = r["atr_pct"]
+    dd = r["dd_3m_pct"]
+    r3m = r["ret_3m_pct"]
+
+    d200s = f"{d200:+.1f}%" if d200 is not None else "n/a"
+    d50s = f"{d50:+.1f}%" if d50 is not None else "n/a"
+    atrs = f"{atr:.1f}%" if atr is not None else "n/a"
+    dds = f"{dd:.1f}%" if dd is not None else "n/a"
+    r3ms = f"{r3m:+.1f}%" if r3m is not None else "n/a"
+
+    flags = []
+    flags.append("MA50>MA200" if r["ma50_gt_ma200"] else "MA50<MA200")
+    if r["breakout_3m"]:
+        flags.append("Breakout")
+
+    return (
+        f"{icon} *{r['ticker']}* — *{score}/100*\n"
+        f"   MA200 {d200s} | MA50 {d50s}\n"
+        f"   ATR {atrs} | DD3M {dds} | R3M {r3ms}\n"
+        f"   {' | '.join(flags)}"
+    )
+
+def _cell(x, w=6, suffix=""):
+    if x is None:
+        s = "n/a"
+    else:
+        s = f"{x:.1f}{suffix}"
+    return s.rjust(w)
+
+def _cell_i(x, w=5):
+    s = "n/a" if x is None else str(int(x))
+    return s.rjust(w)
 
 
 def main():
@@ -288,6 +337,7 @@ def main():
     prev = load_last_snapshot()
     append_history(today, rows)
 
+    # Agregados
     over200 = [r for r in rows if r["ma200"] and r["close"] > r["ma200"]]
     under200 = [r for r in rows if r["ma200"] and r["close"] < r["ma200"]]
     ma50_over200 = [r for r in rows if r["ma50_gt_ma200"]]
@@ -298,10 +348,11 @@ def main():
     pct_ma50_over200 = 100.0 * len(ma50_over200) / len(rows)
     avg_score = sum(r["score"] for r in rows) / len(rows)
 
+    # Alertas + “acciones sugeridas”
     alerts = []
-    reduce = []
-    watch = []
-    opp = []
+    reduce = []   # bajo MA200 + MA50<MA200
+    watch = []    # 0..+5% sobre MA200
+    opp = []      # breakout + MA50>MA200 + sobre MA200
 
     for r in rows:
         t = r["ticker"]
@@ -328,6 +379,7 @@ def main():
     exposure = exposure_continuous(pct_over200, pct_ma50_over200, avg_score, len(alerts), len(rows))
     regime = regime_text(pct_over200, pct_ma50_over200, avg_score)
 
+    # Movers vs última ejecución (si ya hay histórico)
     movers = []
     for r in rows:
         t = r["ticker"]
@@ -338,53 +390,48 @@ def main():
                 prev_d200 = float(prev_row.get("dist_ma200_pct", "nan"))
             except Exception:
                 continue
-
             ds = r["score"] - prev_score if not math.isnan(prev_score) else 0.0
             dd = (r["dist_ma200_pct"] - prev_d200) if (not math.isnan(prev_d200) and r["dist_ma200_pct"] is not None) else None
             movers.append((t, ds, dd))
     movers_sorted = sorted(movers, key=lambda x: abs(x[1]), reverse=True)[:8]
 
+    # Top/Bottom (visual)
     top = sorted(rows, key=lambda x: x["score"], reverse=True)[:6]
     bottom = sorted(rows, key=lambda x: x["score"])[:6]
 
-    def ficha_line(r):
-        d200 = r["dist_ma200_pct"]
-        d50 = r["dist_ma50_pct"]
-        atr = r["atr_pct"]
-        dd = r["dd_3m_pct"]
-        r1m = r["ret_1m_pct"]
-        r3m = r["ret_3m_pct"]
+    # Tabla cuanti (Top 15 por score)
+    table_rows = sorted(
+        rows,
+        key=lambda r: (r["score"], r["dist_ma200_pct"] if r["dist_ma200_pct"] is not None else -999),
+        reverse=True
+    )
+    table = []
+    table.append("Ticker  Score  MA200   MA50   ATR   DD3M   R3M")
+    table.append("-----  -----  -----  -----  ----  -----  -----")
+    for r in table_rows[:15]:
+        t = r["ticker"].ljust(5)[:5]
+        score = _cell_i(r["score"], 5)
+        d200 = _cell(r["dist_ma200_pct"], 5, "%")
+        d50  = _cell(r["dist_ma50_pct"], 5, "%")
+        atr  = _cell(r["atr_pct"], 4, "%")
+        dd   = _cell(r["dd_3m_pct"], 5, "%")
+        r3m  = _cell(r["ret_3m_pct"], 5, "%")
+        table.append(f"{t}  {score}  {d200}  {d50}  {atr}  {dd}  {r3m}")
 
-        flags = []
-        flags.append("MA50>MA200" if r["ma50_gt_ma200"] else "MA50<MA200")
-        if r["breakout_3m"]:
-            flags.append("Breakout3M")
-
-        if None in (d200, d50, atr, dd, r1m, r3m):
-            d200s = f"{d200:+.1f}%" if d200 is not None else "n/a"
-            return f"- {r['ticker']}: score {r['score']}/100 | MA200 {d200s} | {', '.join(flags)}"
-
-        return (
-            f"- {r['ticker']}: score {r['score']}/100 | "
-            f"MA200 {d200:+.1f}% | MA50 {d50:+.1f}% | "
-            f"ATR% {atr:.1f} | DD3M {dd:.1f}% | "
-            f"R1M {r1m:+.1f}% | R3M {r3m:+.1f}% | "
-            f"{', '.join(flags)}"
-        )
-
+    # --------- Build report (visual + cuanti) ----------
     lines = []
-    lines.append(f"📊 INFORME COMPLETO ({today})")
+    lines.append(f"📊 *INFORME COMPLETO* ({today})")
     lines.append("")
-    lines.append("— Agregado —")
+    lines.append("*— Agregado —*")
     lines.append(f"- Valores analizados: {len(rows)} (sin datos: {len(failed)})")
     lines.append(f"- % sobre MA200: {pct_over200:.0f}% ({len(over200)}/{len(rows)})")
     lines.append(f"- % MA50>MA200: {pct_ma50_over200:.0f}% ({len(ma50_over200)}/{len(rows)})")
     lines.append(f"- Score medio: {avg_score:.0f}/100")
     lines.append(f"- Breakouts 3M: {len(breakouts)} | Cerca MA200 (≤{NEAR_MA200_PCT:.1f}%): {len(near200)} | Bajo MA200: {len(under200)}")
     lines.append("")
-    lines.append("— Lectura estratégica —")
+    lines.append("*— Lectura estratégica —*")
     lines.append(f"- Régimen: {regime}")
-    lines.append(f"- Exposición recomendada (semi-cuanti): {exposure:.0f}%")
+    lines.append(f"- Exposición recomendada (semi-cuanti): *{exposure:.0f}%*")
     if len(under200) >= max(3, int(0.25 * len(rows))):
         lines.append("- Lectura: daño estructural relevante (prioridad = proteger y recortar riesgo).")
     elif len(near200) >= max(3, int(0.20 * len(rows))):
@@ -392,38 +439,46 @@ def main():
     else:
         lines.append("- Lectura: estructura razonable; se puede ser selectivo con adds en setups fuertes.")
     lines.append("")
-    lines.append("— Acciones sugeridas (tú decides) —")
+    lines.append("*— Acciones sugeridas (tú decides) —*")
     lines.append(f"- Reducir/recortar (bajo MA200 + MA50<MA200): {', '.join(sorted(set(reduce))) if reduce else 'n/a'}")
     lines.append(f"- Vigilar (0%..+5% sobre MA200): {', '.join(sorted(set(watch))) if watch else 'n/a'}")
     lines.append(f"- Oportunidades (breakout + MA50>MA200 + sobre MA200): {', '.join(sorted(set(opp))) if opp else 'n/a'}")
 
     if movers_sorted:
         lines.append("")
-        lines.append("— Cambios vs última ejecución (score) —")
+        lines.append("*— Cambios vs última ejecución (score) —*")
         for t, ds, dd in movers_sorted:
             dd_txt = f", ΔvsMA200 {dd:+.2f}pp" if dd is not None else ""
             sign = "+" if ds >= 0 else ""
             lines.append(f"- {t}: Δscore {sign}{ds:.0f}{dd_txt}")
 
     lines.append("")
-    lines.append("— Top 6 (ficha) —")
+    lines.append("*— Top 6 (visual) —*")
     for r in top:
         lines.append(ficha_line(r))
+        lines.append("")  # espacio entre fichas
 
-    lines.append("")
-    lines.append("— Bottom 6 (ficha) —")
+    lines.append("*— Bottom 6 (visual) —*")
     for r in bottom:
         lines.append(ficha_line(r))
+        lines.append("")
+
+    # Tabla cuanti al final
+    lines.append("*— Tabla técnica (Top 15 por score) —*")
+    lines.append("```")
+    lines.extend(table)
+    lines.append("```")
 
     if failed:
         lines.append("")
-        lines.append("— Sin datos / error —")
+        lines.append("*— Sin datos / error —*")
         lines.append(", ".join(failed))
 
     send_telegram("\n".join(lines))
 
+    # Mensaje 2: alertas separadas
     if alerts:
-        send_telegram("🚨 ALERTAS\n\n" + "\n".join(alerts))
+        send_telegram("🚨 *ALERTAS*\n\n" + "\n".join(alerts))
 
 
 if __name__ == "__main__":
