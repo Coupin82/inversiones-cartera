@@ -15,7 +15,7 @@ import numpy as np
 # TU CARTERA USA
 # ----------------------------
 
-CARTERA_USA = [
+TICKERS = [
     "BAC","PLTR","QBTS","OKLO","RKLB","NBIS","IREN","ZETA",
     "OPEN","EOSE","NVTS","CIFR","NUAI","CAN","ONDS",
     "SKYT","PL","ADUR","RDW","ASST",
