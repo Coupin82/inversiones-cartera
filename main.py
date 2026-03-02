@@ -9,31 +9,34 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 def send_telegram(text: str) -> None:
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram no configurado")
-        return
+        raise RuntimeError("Faltan TELEGRAM_TOKEN o TELEGRAM_CHAT_ID en secrets.")
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+
+    chat_id = str(TELEGRAM_CHAT_ID).strip()
+
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": chat_id,
         "text": text,
         "disable_web_page_preview": True
     }
 
     r = requests.post(url, json=payload, timeout=30)
-    r.raise_for_status()
+
+    if r.status_code != 200:
+        raise RuntimeError(f"Telegram error {r.status_code}: {r.text}")
 
 
 def get_last_value(series):
     """Devuelve el último valor aunque venga como Series (MultiIndex)."""
     value = series.iloc[-1]
-    if hasattr(value, "iloc"):  # Si todavía es Series
+    if hasattr(value, "iloc"):
         value = value.iloc[0]
     return float(value)
 
 
 def main():
-    # ⚠️ De momento dejamos estos tickers de prueba
-    tickers = ["AAPL", "MSFT"]
+    tickers = ["AAPL", "MSFT"]  # luego pondremos tu cartera real
 
     alerts = []
 
@@ -60,7 +63,6 @@ def main():
         msg = "📊 Alertas técnicas\n\n" + "\n".join(alerts)
         send_telegram(msg)
     else:
-        # Mensaje de confirmación para probar que Telegram funciona
         send_telegram("✅ Sistema ejecutado correctamente. Sin alertas hoy.")
 
 
