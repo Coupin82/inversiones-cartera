@@ -7,7 +7,10 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # ====== CONFIG ======
 TICKERS = [
-    "AAPL", "MSFT",  # <-- sustituye por tu cartera real
+    "BAC","PLTR","QBTS","OKLO","RKLB","NBIS","IREN","ZETA",
+    "OPEN","EOSE","NVTS","CIFR","NUAI","CAN","ONDS",
+    "SKYT","PL","ADUR","RDW","ASST",
+    "SATL","IBRX","VG","PRME","ATAI","TMDX",  # <-- sustituye por tu cartera real
 ]
 
 NEAR_MA200_PCT = 2.0      # “cerca de perder MA200” si está entre 0% y +2%
