@@ -19,7 +19,7 @@ CARTERA_USA = [
     "BAC","PLTR","QBTS","OKLO","RKLB","NBIS","IREN","ZETA",
     "OPEN","EOSE","NVTS","CIFR","NUAI","CAN","ONDS",
     "SKYT","PL","ADUR","RDW","ASST",
-    "SATL","IBRX","VG","PRME","ATAI","TMDX","AEHR"
+    "SATL","IBRX","VG","PRME","ATAI","TMDX","AEHR","SOFI",
 ]
 
 SCOUTING_EXT = [
