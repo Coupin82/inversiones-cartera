@@ -40,6 +40,13 @@ MAX_TG_LEN = 3800
 HISTORY_PATH = "data/history.csv"
 TZ = ZoneInfo("Europe/Madrid")
 
+# A) filtro anti-"muy extendida" para oportunidades (sobre MA200)
+OPP_MAX_EXT_MA200_PCT = 12.0        # 0..+12% sobre MA200
+
+# C) buckets de tamaño por ATR%
+ATR_BIG_MAX = 3.0
+ATR_MED_MAX = 6.0
+
 
 # ============================================================
 # TELEGRAM (Markdown + safe chunking)
@@ -215,16 +222,24 @@ def analyze_ticker(ticker: str):
     if ma200 is not None and prev_close is not None:
         recently_lost_ma200 = (prev_close > ma200 and close < ma200)
 
+    # Breakout + calidad (D)
     breakout_3m = False
+    breakout_quality_pct = None  # % por encima del max previo 3M
     if "High" in df and len(df) >= BREAKOUT_LOOKBACK + 1:
         recent_high = _to_float_or_none(df["High"].iloc[-(BREAKOUT_LOOKBACK + 1):-1].max())
-        if recent_high is not None:
+        if recent_high is not None and recent_high > 0:
             breakout_3m = close > recent_high
+            breakout_quality_pct = (close / recent_high - 1.0) * 100.0
 
     atr_pct = compute_atr_pct(df, ATR_PERIOD)
     dd_3m = compute_drawdown_pct(df, BREAKOUT_LOOKBACK)
     ret_1m = compute_return_pct(df, 21)
     ret_3m = compute_return_pct(df, 63)
+
+    # E) retorno 1D para movers
+    ret_1d = None
+    if prev_close not in (None, 0):
+        ret_1d = (close / prev_close - 1.0) * 100.0
 
     ma50_gt_ma200 = (ma50 is not None and ma200 is not None and ma50 > ma200)
 
@@ -244,10 +259,12 @@ def analyze_ticker(ticker: str):
         "dist_ma200_pct": dist_ma200,
         "ma50_gt_ma200": ma50_gt_ma200,
         "breakout_3m": breakout_3m,
+        "breakout_quality_pct": breakout_quality_pct,
         "atr_pct": atr_pct,
         "dd_3m_pct": dd_3m,
         "ret_1m_pct": ret_1m,
         "ret_3m_pct": ret_3m,
+        "ret_1d_pct": ret_1d,
         "score": score,
         "recently_lost_ma200": recently_lost_ma200,
     }
@@ -284,8 +301,8 @@ def append_history(date_str: str, rows: list[dict]):
     fields = [
         "date","ticker","close","ma50","ma200",
         "dist_ma50_pct","dist_ma200_pct",
-        "ma50_gt_ma200","breakout_3m",
-        "atr_pct","dd_3m_pct","ret_1m_pct","ret_3m_pct",
+        "ma50_gt_ma200","breakout_3m","breakout_quality_pct",
+        "atr_pct","dd_3m_pct","ret_1m_pct","ret_3m_pct","ret_1d_pct",
         "score","recently_lost_ma200"
     ]
 
@@ -305,10 +322,12 @@ def append_history(date_str: str, rows: list[dict]):
                 "dist_ma200_pct": _safe_round(r["dist_ma200_pct"], 3),
                 "ma50_gt_ma200": int(bool(r["ma50_gt_ma200"])),
                 "breakout_3m": int(bool(r["breakout_3m"])),
+                "breakout_quality_pct": _safe_round(r.get("breakout_quality_pct"), 3),
                 "atr_pct": _safe_round(r["atr_pct"], 3),
                 "dd_3m_pct": _safe_round(r["dd_3m_pct"], 3),
                 "ret_1m_pct": _safe_round(r["ret_1m_pct"], 3),
                 "ret_3m_pct": _safe_round(r["ret_3m_pct"], 3),
+                "ret_1d_pct": _safe_round(r.get("ret_1d_pct"), 3),
                 "score": int(r["score"]),
                 "recently_lost_ma200": int(bool(r.get("recently_lost_ma200", False))),
             })
@@ -334,19 +353,28 @@ def regime_text(pct_over_ma200, pct_ma50_over_ma200, avg_score):
     return "Riesgo-off (estructura dañada)"
 
 def exposure_light(exposure_pct: float) -> str:
-    # Semáforo simple
     if exposure_pct >= 70:
         return "🟢"
     if exposure_pct >= 40:
         return "🟡"
     return "🔴"
 
+def size_bucket_from_atr(atr_pct: float | None) -> str:
+    # C) buckets de tamaño por ATR
+    if atr_pct is None:
+        return "n/a"
+    if atr_pct <= ATR_BIG_MAX:
+        return "Grande"
+    if atr_pct <= ATR_MED_MAX:
+        return "Medio"
+    return "Pequeño"
+
 
 # ============================================================
 # FORMATTING (mini-tarjeta por ticker)
 # ============================================================
 
-def mini_card(r: dict) -> str:
+def mini_card(r: dict, include_size_hint: bool = False) -> str:
     score = r["score"]
     icon = "🟢" if score >= 70 else ("🟡" if score >= 40 else "🔴")
 
@@ -359,13 +387,21 @@ def mini_card(r: dict) -> str:
     flags = []
     flags.append("MA50>MA200" if r["ma50_gt_ma200"] else "MA50<MA200")
     if r["breakout_3m"]:
-        flags.append("Breakout")
+        # D) calidad del breakout
+        q = r.get("breakout_quality_pct")
+        qtxt = f"{q:+.1f}%" if q is not None else "n/a"
+        flags.append(f"Breakout {qtxt}")
+
+    extra = ""
+    if include_size_hint:
+        extra = f"\n   Tamaño sugerido (ATR): {size_bucket_from_atr(r.get('atr_pct'))}"
 
     return (
         f"{icon} *{r['ticker']}* — *{score}/100*\n"
         f"   MA200 {d200s} | MA50 {d50s}\n"
         f"   ATR {atrs} | DD3M {dds} | R3M {r3ms}\n"
         f"   {' | '.join(flags)}"
+        f"{extra}"
     )
 
 def arrow_delta(x: float) -> str:
@@ -431,9 +467,11 @@ def main():
     pct_ma50_over200 = 100.0 * len(ma50_over200) / denom
     avg_score = (sum(r["score"] for r in rows_cartera) / denom) if rows_cartera else 0.0
 
-    # Breadth por calidad (verdes)
+    # B) breadth por calidad: verdes y rojos
     n_green = sum(1 for r in rows_cartera if r["score"] >= 70)
     pct_green = 100.0 * n_green / denom
+    n_red = sum(1 for r in rows_cartera if r["score"] < 40)
+    pct_red = 100.0 * n_red / denom
 
     # Top riesgo por volatilidad (ATR%)
     atr_sorted = sorted(
@@ -443,13 +481,21 @@ def main():
     )
     top_atr = atr_sorted[:3]
 
+    # E) movers por retorno 1D (cartera)
+    movers_1d = [r for r in rows_cartera if r.get("ret_1d_pct") is not None]
+    top_1d = sorted(movers_1d, key=lambda x: x["ret_1d_pct"], reverse=True)[:3]
+    bot_1d = sorted(movers_1d, key=lambda x: x["ret_1d_pct"])[:3]
+
     # ========== Alertas y acciones (solo cartera) ==========
     alerts_risk = []
     alerts_momo = []
 
     reduce = []
     watch = []
-    opp = []
+
+    # A) Oportunidades: más estrictas (anti-extendidas)
+    opp_strict = []   # lista de dicts (para mostrar con tamaño sugerido)
+    opp_reject_ext = []  # tickers que cumplían todo menos extensión
 
     for r in rows_cartera:
         t = r["ticker"]
@@ -466,20 +512,34 @@ def main():
         if ma50lt200:
             alerts_risk.append(f"📉 {t} MA50<MA200")
         if r["breakout_3m"]:
-            alerts_momo.append(f"🚀 {t} ruptura 3M")
+            q = r.get("breakout_quality_pct")
+            qtxt = f" ({q:+.1f}%)" if q is not None else ""
+            alerts_momo.append(f"🚀 {t} ruptura 3M{qtxt}")
 
         if below200 and ma50lt200:
             reduce.append(t)
         elif d200 is not None and 0 <= d200 <= 5:
             watch.append(t)
-        if r["breakout_3m"] and r["ma50_gt_ma200"] and (r["ma200"] and r["close"] > r["ma200"]):
-            opp.append(t)
+
+        # Oportunidad candidata (base)
+        base_opp = (
+            r["breakout_3m"]
+            and r["ma50_gt_ma200"]
+            and (r["ma200"] is not None and r["close"] > r["ma200"])
+        )
+
+        if base_opp:
+            # filtro A: no demasiado extendida sobre MA200
+            if d200 is not None and 0 <= d200 <= OPP_MAX_EXT_MA200_PCT:
+                opp_strict.append(r)
+            else:
+                opp_reject_ext.append(t)
 
     exposure = exposure_continuous(pct_over200, pct_ma50_over200, avg_score, len(alerts_risk), denom)
     semaforo = exposure_light(exposure)
     regime = regime_text(pct_over200, pct_ma50_over200, avg_score)
 
-    # Movers (todo el universo)
+    # Movers vs última ejecución (score) (todo el universo)
     movers = []
     for r in rows:
         t = r["ticker"]
@@ -524,9 +584,21 @@ def main():
     lines.append("🧱 *Estructura de cartera*")
     lines.append(f"• Sobre MA200: *{pct_over200:.0f}%* ({len(over200)}/{denom})")
     lines.append(f"• MA50 > MA200: *{pct_ma50_over200:.0f}%* ({len(ma50_over200)}/{denom})")
-    lines.append(f"• Verdes (score ≥70): *{n_green}/{denom}* ({pct_green:.0f}%)")
+    lines.append(f"• Verdes (score ≥70): *{n_green}/{denom}* ({pct_green:.0f}%) | Rojos (score <40): *{n_red}/{denom}* ({pct_red:.0f}%)")
     lines.append(f"• Score medio: *{avg_score:.0f}/100*")
     lines.append(f"• Bajo MA200: *{len(under200)}* | Cerca MA200 (≤{NEAR_MA200_PCT:.1f}%): *{len(near200)}* | Breakouts 3M: *{len(breakouts_cartera)}*")
+    lines.append("")
+
+    # E) movers del día (cartera)
+    lines.append("⚡ *Movimientos del día (cartera, 1D)*")
+    if top_1d:
+        lines.append("• Top 1D: " + ", ".join([f"{r['ticker']} {_fmt_pct(r['ret_1d_pct'], 1, signed=True)}" for r in top_1d]))
+    else:
+        lines.append("• Top 1D: n/a")
+    if bot_1d:
+        lines.append("• Bottom 1D: " + ", ".join([f"{r['ticker']} {_fmt_pct(r['ret_1d_pct'], 1, signed=True)}" for r in bot_1d]))
+    else:
+        lines.append("• Bottom 1D: n/a")
     lines.append("")
 
     # Lectura estratégica
@@ -538,21 +610,21 @@ def main():
     else:
         lines.append("• Prioridad: *selectivo* (estructura razonable).")
 
-    # Punto 1: recuperación MA200
+    # Recuperación MA200
     if recover200:
         rec = ", ".join([r["ticker"] for r in sorted(recover200, key=lambda x: x["dist_ma200_pct"])[:10]])
         lines.append(f"• Recuperación MA200 (−{RECOVER_MA200_PCT:.0f}%..0%): {rec}")
     else:
         lines.append(f"• Recuperación MA200 (−{RECOVER_MA200_PCT:.0f}%..0%): n/a")
 
-    # Punto 3: riesgo por ATR
+    # Riesgo por ATR
     if top_atr:
         atr_txt = ", ".join([f"{r['ticker']} {_fmt_pct(r['atr_pct'], 1, signed=False)}" for r in top_atr])
         lines.append(f"• Riesgo (ATR alto): {atr_txt}")
     else:
         lines.append("• Riesgo (ATR alto): n/a")
 
-    # Punto 4: pérdidas recientes MA200
+    # Pérdidas recientes MA200
     if recently_lost:
         lost_txt = ", ".join([r["ticker"] for r in recently_lost])
         lines.append(f"• Pérdida reciente MA200: {lost_txt}")
@@ -565,12 +637,15 @@ def main():
     lines.append("🛠️ *Acciones sugeridas (solo cartera)*")
     lines.append(f"• Reducir/recortar: {', '.join(sorted(set(reduce))) if reduce else 'n/a'}")
     lines.append(f"• Vigilar (0%..+5% MA200): {', '.join(sorted(set(watch))) if watch else 'n/a'}")
-    lines.append(f"• Oportunidades (setup fuerte): {', '.join(sorted(set(opp))) if opp else 'n/a'}")
+    lines.append(f"• Oportunidades (setup fuerte, no extendido): {', '.join([r['ticker'] for r in sorted(opp_strict, key=lambda x: x['score'], reverse=True)]) if opp_strict else 'n/a'}")
+    if opp_reject_ext:
+        # no lo hago muy largo; solo 8
+        lines.append(f"• (Info) Señales descartadas por extensión >{OPP_MAX_EXT_MA200_PCT:.0f}%: {', '.join(sorted(set(opp_reject_ext))[:8])}")
 
-    # Movers
+    # Movers vs última ejecución (score)
     if movers_sorted:
         lines.append("")
-        lines.append("🔁 *Movers vs última ejecución*")
+        lines.append("🔁 *Movers vs última ejecución (score)*")
         for t, ds, dd in movers_sorted:
             sgn = "+" if ds >= 0 else ""
             dd_txt = f" | ΔvsMA200 {dd:+.2f}pp" if dd is not None else ""
@@ -584,7 +659,7 @@ def main():
     lines.append("")
     if top:
         for r in top:
-            lines.append(mini_card(r))
+            lines.append(mini_card(r, include_size_hint=False))
             lines.append("")
     else:
         lines.append("n/a")
@@ -595,7 +670,20 @@ def main():
     lines.append("")
     if bottom:
         for r in bottom:
-            lines.append(mini_card(r))
+            lines.append(mini_card(r, include_size_hint=False))
+            lines.append("")
+    else:
+        lines.append("n/a")
+        lines.append("")
+
+    # C) Tamaño sugerido (ATR) aplicado SOLO a oportunidades estrictas
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("📏 *Tamaño sugerido (solo para oportunidades)*")
+    lines.append("_Regla simple por ATR: ≤3% grande | 3–6% medio | >6% pequeño._")
+    lines.append("")
+    if opp_strict:
+        for r in sorted(opp_strict, key=lambda x: x["score"], reverse=True)[:8]:
+            lines.append(mini_card(r, include_size_hint=True))
             lines.append("")
     else:
         lines.append("n/a")
@@ -614,7 +702,7 @@ def main():
         lines.append("• Top 6 scouting por score:")
         lines.append("")
         for r in scout_top:
-            lines.append(mini_card(r))
+            lines.append(mini_card(r, include_size_hint=False))
             lines.append("")
     else:
         lines.append("• Top 6 scouting por score: n/a")
@@ -642,7 +730,7 @@ def main():
         if alert_lines:
             alert_lines.append("")
         alert_lines.append("🚀 *ALERTAS (Momentum — cartera)*")
-        alert_lines.append("_Leyenda: 🚀 ruptura de máximos ~3 meses_")
+        alert_lines.append("_Leyenda: 🚀 ruptura 3M (entre paréntesis: calidad = % sobre el máximo previo)._")
         alert_lines.append("")
         alert_lines.extend(alerts_momo)
 
