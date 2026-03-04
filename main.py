@@ -8,16 +8,35 @@ import pandas as pd
 import requests
 import yfinance as yf
 
+# ============================================================
+# CONFIG
+# ============================================================
+
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# ====== CONFIG ======
-TICKERS = [
+# ----------------------------
+# TU CARTERA USA (internos)
+# ----------------------------
+CARTERA_USA = [
     "BAC","PLTR","QBTS","OKLO","RKLB","NBIS","IREN","ZETA",
     "OPEN","EOSE","NVTS","CIFR","NUAI","CAN","ONDS",
     "SKYT","PL","ADUR","RDW","ASST",
     "SATL","IBRX","VG","PRME","ATAI","TMDX","AEHR"
 ]
+
+# ----------------------------
+# SCOUTING EXTERNO
+# ----------------------------
+SCOUTING_EXT = [
+    "SOUN","BBAI","AI","INOD","ALKT","DCBO",
+    "LUNR","ASTS","SPIR","KTOS","AVAV",
+    "ENVX","STEM","RUN","FLNC",
+    "CRNX","IOVA","ARDX","MRSN","SDGR",
+    "AMSC","MP","CLSK"
+]
+
+UNIVERSO = sorted(set(CARTERA_USA + SCOUTING_EXT))
 
 NEAR_MA200_PCT = 2.0          # 0..+2% = “cerca de perder MA200”
 BREAKOUT_LOOKBACK = 63        # ~3 meses bursátiles
@@ -25,10 +44,12 @@ ATR_PERIOD = 14
 MAX_TG_LEN = 3800             # margen bajo 4096
 HISTORY_PATH = "data/history.csv"
 TZ = ZoneInfo("Europe/Madrid")
-# ====================
 
 
-# ---------- Telegram (Markdown + chunking) ----------
+# ============================================================
+# TELEGRAM (Markdown + chunking)
+# ============================================================
+
 def send_telegram(text: str) -> None:
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         raise RuntimeError("Faltan TELEGRAM_TOKEN o TELEGRAM_CHAT_ID en secrets.")
@@ -37,7 +58,7 @@ def send_telegram(text: str) -> None:
     chat_id = str(TELEGRAM_CHAT_ID).strip()
 
     chunks = []
-    s = text
+    s = text or ""
     while len(s) > MAX_TG_LEN:
         cut = s.rfind("\n", 0, MAX_TG_LEN)
         if cut == -1:
@@ -58,7 +79,10 @@ def send_telegram(text: str) -> None:
             raise RuntimeError(f"Telegram error {r.status_code}: {r.text}")
 
 
-# ---------- Utils ----------
+# ============================================================
+# UTILS
+# ============================================================
+
 def _scalar(x):
     if hasattr(x, "iloc"):
         x = x.iloc[0]
@@ -86,7 +110,10 @@ def clamp(x, lo=0.0, hi=100.0):
     return max(lo, min(hi, x))
 
 
-# ---------- Indicators ----------
+# ============================================================
+# INDICATORS
+# ============================================================
+
 def compute_atr_pct(df, period=14):
     # ATR (SMA) del True Range; atr% = ATR / Close * 100
     if df is None or df.empty or "High" not in df or "Low" not in df or "Close" not in df:
@@ -103,7 +130,6 @@ def compute_atr_pct(df, period=14):
     tr2 = (high - prev_close).abs()
     tr3 = (low - prev_close).abs()
 
-    # True Range robusto (evita .combine(max) y problemas con Series/MultiIndex)
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
     atr = tr.rolling(period).mean().iloc[-1]
@@ -138,7 +164,10 @@ def compute_return_pct(df, lookback=20):
     return (last / prev - 1.0) * 100.0
 
 
-# ---------- Core analysis ----------
+# ============================================================
+# CORE ANALYSIS
+# ============================================================
+
 def analyze_ticker(ticker: str):
     df = yf.download(
         ticker,
@@ -201,7 +230,10 @@ def analyze_ticker(ticker: str):
     }
 
 
-# ---------- History ----------
+# ============================================================
+# HISTORY
+# ============================================================
+
 def ensure_history_dir():
     d = os.path.dirname(HISTORY_PATH)
     if d and not os.path.exists(d):
@@ -258,9 +290,11 @@ def append_history(date_str: str, rows: list[dict]):
             })
 
 
-# ---------- Strategy helpers ----------
+# ============================================================
+# STRATEGY HELPERS
+# ============================================================
+
 def exposure_continuous(pct_over_ma200, pct_ma50_over_ma200, avg_score, n_alerts, n_total):
-    # Exposición 0-100 “continua”
     base = 0.55 * pct_over_ma200 + 0.35 * pct_ma50_over_ma200 + 0.10 * avg_score
     if n_total > 0:
         alert_ratio = n_alerts / n_total
@@ -277,53 +311,77 @@ def regime_text(pct_over_ma200, pct_ma50_over_ma200, avg_score):
     return "Riesgo-off (estructura dañada)"
 
 
-# ---------- Formatting (visual + table) ----------
-def ficha_line(r):
-    score = r["score"]
-    icon = "🟢" if score >= 70 else ("🟡" if score >= 40 else "🔴")
-
-    d200 = r["dist_ma200_pct"]
-    d50 = r["dist_ma50_pct"]
-    atr = r["atr_pct"]
-    dd = r["dd_3m_pct"]
-    r3m = r["ret_3m_pct"]
-
-    d200s = f"{d200:+.1f}%" if d200 is not None else "n/a"
-    d50s = f"{d50:+.1f}%" if d50 is not None else "n/a"
-    atrs = f"{atr:.1f}%" if atr is not None else "n/a"
-    dds = f"{dd:.1f}%" if dd is not None else "n/a"
-    r3ms = f"{r3m:+.1f}%" if r3m is not None else "n/a"
-
-    flags = []
-    flags.append("MA50>MA200" if r["ma50_gt_ma200"] else "MA50<MA200")
-    if r["breakout_3m"]:
-        flags.append("Breakout")
-
-    return (
-        f"{icon} *{r['ticker']}* — *{score}/100*\n"
-        f"   MA200 {d200s} | MA50 {d50s}\n"
-        f"   ATR {atrs} | DD3M {dds} | R3M {r3ms}\n"
-        f"   {' | '.join(flags)}"
-    )
+# ============================================================
+# FORMATTING (Telegram-friendly tables)
+# ============================================================
 
 def _cell(x, w=6, suffix=""):
     if x is None:
         s = "n/a"
     else:
-        s = f"{x:.1f}{suffix}"
+        # para % queremos signo
+        if suffix == "%":
+            s = f"{x:+.1f}{suffix}"
+        else:
+            s = f"{x:.1f}{suffix}"
     return s.rjust(w)
 
 def _cell_i(x, w=5):
     s = "n/a" if x is None else str(int(x))
     return s.rjust(w)
 
+def build_rank_table(title: str, rows: list[dict], n: int = 6) -> str:
+    out = []
+    out.append(f"*— {title} —*")
+    out.append("```")
+    out.append("Ticker Score  MA200   MA50   ATR   DD3M   R3M")
+    out.append("----- -----  -----  -----  ----  -----  -----")
+    for r in rows[:n]:
+        t = r["ticker"].ljust(5)[:5]
+        score = _cell_i(r["score"], 5)
+        d200 = _cell(r["dist_ma200_pct"], 5, "%")
+        d50  = _cell(r["dist_ma50_pct"], 5, "%")
+        atr  = _cell(r["atr_pct"], 4, "%")
+        dd   = _cell(r["dd_3m_pct"], 5, "%")
+        r3m  = _cell(r["ret_3m_pct"], 5, "%")
+        out.append(f"{t} {score}  {d200}  {d50}  {atr}  {dd}  {r3m}")
+    out.append("```")
+    return "\n".join(out)
+
+def build_top15_table(rows: list[dict]) -> str:
+    table_rows = sorted(
+        rows,
+        key=lambda r: (r["score"], r["dist_ma200_pct"] if r["dist_ma200_pct"] is not None else -999),
+        reverse=True
+    )
+    out = []
+    out.append("*— Tabla técnica (Top 15 por score) —*")
+    out.append("```")
+    out.append("Ticker Score  MA200   MA50   ATR   DD3M   R3M")
+    out.append("----- -----  -----  -----  ----  -----  -----")
+    for r in table_rows[:15]:
+        t = r["ticker"].ljust(5)[:5]
+        score = _cell_i(r["score"], 5)
+        d200 = _cell(r["dist_ma200_pct"], 5, "%")
+        d50  = _cell(r["dist_ma50_pct"], 5, "%")
+        atr  = _cell(r["atr_pct"], 4, "%")
+        dd   = _cell(r["dd_3m_pct"], 5, "%")
+        r3m  = _cell(r["ret_3m_pct"], 5, "%")
+        out.append(f"{t} {score}  {d200}  {d50}  {atr}  {dd}  {r3m}")
+    out.append("```")
+    return "\n".join(out)
+
+
+# ============================================================
+# MAIN
+# ============================================================
 
 def main():
     today = datetime.now(TZ).date().isoformat()
 
     rows = []
     failed = []
-    for t in TICKERS:
+    for t in UNIVERSO:
         r = analyze_ticker(t)
         if r:
             rows.append(r)
@@ -395,35 +453,18 @@ def main():
             movers.append((t, ds, dd))
     movers_sorted = sorted(movers, key=lambda x: abs(x[1]), reverse=True)[:8]
 
-    # Top/Bottom (visual)
+    # Top/Bottom (tabla)
     top = sorted(rows, key=lambda x: x["score"], reverse=True)[:6]
     bottom = sorted(rows, key=lambda x: x["score"])[:6]
 
-    # Tabla cuanti (Top 15 por score)
-    table_rows = sorted(
-        rows,
-        key=lambda r: (r["score"], r["dist_ma200_pct"] if r["dist_ma200_pct"] is not None else -999),
-        reverse=True
-    )
-    table = []
-    table.append("Ticker  Score  MA200   MA50   ATR   DD3M   R3M")
-    table.append("-----  -----  -----  -----  ----  -----  -----")
-    for r in table_rows[:15]:
-        t = r["ticker"].ljust(5)[:5]
-        score = _cell_i(r["score"], 5)
-        d200 = _cell(r["dist_ma200_pct"], 5, "%")
-        d50  = _cell(r["dist_ma50_pct"], 5, "%")
-        atr  = _cell(r["atr_pct"], 4, "%")
-        dd   = _cell(r["dd_3m_pct"], 5, "%")
-        r3m  = _cell(r["ret_3m_pct"], 5, "%")
-        table.append(f"{t}  {score}  {d200}  {d50}  {atr}  {dd}  {r3m}")
-
-    # --------- Build report (visual + cuanti) ----------
+    # --------- Build report (Telegram-friendly) ----------
     lines = []
     lines.append(f"📊 *INFORME COMPLETO* ({today})")
     lines.append("")
+    lines.append("*— Universo —*")
+    lines.append(f"- Internos (CARTERA_USA): {len(CARTERA_USA)} | Scouting: {len(SCOUTING_EXT)} | Total: {len(rows)} (sin datos: {len(failed)})")
+    lines.append("")
     lines.append("*— Agregado —*")
-    lines.append(f"- Valores analizados: {len(rows)} (sin datos: {len(failed)})")
     lines.append(f"- % sobre MA200: {pct_over200:.0f}% ({len(over200)}/{len(rows)})")
     lines.append(f"- % MA50>MA200: {pct_ma50_over200:.0f}% ({len(ma50_over200)}/{len(rows)})")
     lines.append(f"- Score medio: {avg_score:.0f}/100")
@@ -453,21 +494,11 @@ def main():
             lines.append(f"- {t}: Δscore {sign}{ds:.0f}{dd_txt}")
 
     lines.append("")
-    lines.append("*— Top 6 (visual) —*")
-    for r in top:
-        lines.append(ficha_line(r))
-        lines.append("")  # espacio entre fichas
-
-    lines.append("*— Bottom 6 (visual) —*")
-    for r in bottom:
-        lines.append(ficha_line(r))
-        lines.append("")
-
-    # Tabla cuanti al final
-    lines.append("*— Tabla técnica (Top 15 por score) —*")
-    lines.append("```")
-    lines.extend(table)
-    lines.append("```")
+    lines.append(build_rank_table("Top 6", top, 6))
+    lines.append("")
+    lines.append(build_rank_table("Bottom 6", bottom, 6))
+    lines.append("")
+    lines.append(build_top15_table(rows))
 
     if failed:
         lines.append("")
