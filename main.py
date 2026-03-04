@@ -38,17 +38,59 @@ SCOUTING_EXT = [
 
 UNIVERSO = sorted(set(CARTERA_USA + SCOUTING_EXT))
 
-NEAR_MA200_PCT = 2.0          # 0..+2% = “cerca de perder MA200”
-BREAKOUT_LOOKBACK = 63        # ~3 meses bursátiles
+NEAR_MA200_PCT = 2.0
+BREAKOUT_LOOKBACK = 63
 ATR_PERIOD = 14
-MAX_TG_LEN = 3800             # margen bajo 4096
+MAX_TG_LEN = 3800
 HISTORY_PATH = "data/history.csv"
 TZ = ZoneInfo("Europe/Madrid")
 
 
 # ============================================================
-# TELEGRAM (Markdown + chunking)
+# TELEGRAM (Markdown + safe chunking)
 # ============================================================
+
+def _split_markdown_safe(text: str, max_len: int) -> list[str]:
+    """
+    Split text into chunks <= max_len, but never split while inside a ``` code block.
+    This avoids Telegram "can't parse entities" when a chunk has an unclosed fence.
+    """
+    lines = (text or "").splitlines(True)  # keep \n
+    chunks = []
+    buf = ""
+    in_code = False
+
+    def toggle_code(line: str) -> bool:
+        # Telegram fences usually are exactly ``` or start with ```
+        return line.lstrip().startswith("```")
+
+    for line in lines:
+        if toggle_code(line):
+            in_code = not in_code
+
+        # if adding this line would exceed max_len, flush buffer if it's safe
+        if len(buf) + len(line) > max_len:
+            if in_code:
+                # We are inside code block: don't split here.
+                # Try to flush earlier by backtracking to last safe position.
+                # Fallback: if buf itself is already huge, force flush (rare with your sizes).
+                if buf:
+                    chunks.append(buf.rstrip("\n"))
+                    buf = ""
+                # continue accumulating (still in code)
+                buf += line
+            else:
+                if buf:
+                    chunks.append(buf.rstrip("\n"))
+                buf = line
+        else:
+            buf += line
+
+    if buf.strip():
+        chunks.append(buf.rstrip("\n"))
+
+    return chunks
+
 
 def send_telegram(text: str) -> None:
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -57,15 +99,7 @@ def send_telegram(text: str) -> None:
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     chat_id = str(TELEGRAM_CHAT_ID).strip()
 
-    chunks = []
-    s = text or ""
-    while len(s) > MAX_TG_LEN:
-        cut = s.rfind("\n", 0, MAX_TG_LEN)
-        if cut == -1:
-            cut = MAX_TG_LEN
-        chunks.append(s[:cut])
-        s = s[cut:].lstrip("\n")
-    chunks.append(s)
+    chunks = _split_markdown_safe(text, MAX_TG_LEN)
 
     for ch in chunks:
         payload = {
@@ -115,7 +149,6 @@ def clamp(x, lo=0.0, hi=100.0):
 # ============================================================
 
 def compute_atr_pct(df, period=14):
-    # ATR (SMA) del True Range; atr% = ATR / Close * 100
     if df is None or df.empty or "High" not in df or "Low" not in df or "Close" not in df:
         return None
     if len(df) < period + 2:
@@ -129,18 +162,15 @@ def compute_atr_pct(df, period=14):
     tr1 = (high - low).abs()
     tr2 = (high - prev_close).abs()
     tr3 = (low - prev_close).abs()
-
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
-    atr = tr.rolling(period).mean().iloc[-1]
-    atr = _to_float_or_none(atr)
+    atr = _to_float_or_none(tr.rolling(period).mean().iloc[-1])
     c = _to_float_or_none(close.iloc[-1])
     if atr is None or c is None or c == 0:
         return None
     return (atr / c) * 100.0
 
 def compute_drawdown_pct(df, lookback=63):
-    # drawdown desde el máximo del lookback hasta el último close
     if df is None or df.empty or "Close" not in df:
         return None
     if len(df) < lookback:
@@ -193,19 +223,17 @@ def analyze_ticker(ticker: str):
 
     breakout_3m = False
     if "High" in df and len(df) >= BREAKOUT_LOOKBACK + 1:
-        recent_high = df["High"].iloc[-(BREAKOUT_LOOKBACK + 1):-1].max()
-        recent_high = _to_float_or_none(recent_high)
+        recent_high = _to_float_or_none(df["High"].iloc[-(BREAKOUT_LOOKBACK + 1):-1].max())
         if recent_high is not None:
             breakout_3m = close > recent_high
 
     atr_pct = compute_atr_pct(df, ATR_PERIOD)
     dd_3m = compute_drawdown_pct(df, BREAKOUT_LOOKBACK)
-    ret_1m = compute_return_pct(df, 21)   # ~1 mes
-    ret_3m = compute_return_pct(df, 63)   # ~3 meses
+    ret_1m = compute_return_pct(df, 21)
+    ret_3m = compute_return_pct(df, 63)
 
     ma50_gt_ma200 = (ma50 is not None and ma200 is not None and ma50 > ma200)
 
-    # Score 0-100
     score = 0
     if ma200 and close > ma200: score += 35
     if ma50 and close > ma50: score += 20
@@ -297,8 +325,7 @@ def append_history(date_str: str, rows: list[dict]):
 def exposure_continuous(pct_over_ma200, pct_ma50_over_ma200, avg_score, n_alerts, n_total):
     base = 0.55 * pct_over_ma200 + 0.35 * pct_ma50_over_ma200 + 0.10 * avg_score
     if n_total > 0:
-        alert_ratio = n_alerts / n_total
-        base -= 35.0 * alert_ratio
+        base -= 35.0 * (n_alerts / n_total)
     return clamp(base, 0, 100)
 
 def regime_text(pct_over_ma200, pct_ma50_over_ma200, avg_score):
@@ -319,7 +346,6 @@ def _cell(x, w=6, suffix=""):
     if x is None:
         s = "n/a"
     else:
-        # para % queremos signo
         if suffix == "%":
             s = f"{x:+.1f}{suffix}"
         else:
@@ -406,11 +432,10 @@ def main():
     pct_ma50_over200 = 100.0 * len(ma50_over200) / len(rows)
     avg_score = sum(r["score"] for r in rows) / len(rows)
 
-    # Alertas + “acciones sugeridas”
     alerts = []
-    reduce = []   # bajo MA200 + MA50<MA200
-    watch = []    # 0..+5% sobre MA200
-    opp = []      # breakout + MA50>MA200 + sobre MA200
+    reduce = []
+    watch = []
+    opp = []
 
     for r in rows:
         t = r["ticker"]
@@ -437,7 +462,6 @@ def main():
     exposure = exposure_continuous(pct_over200, pct_ma50_over200, avg_score, len(alerts), len(rows))
     regime = regime_text(pct_over200, pct_ma50_over200, avg_score)
 
-    # Movers vs última ejecución (si ya hay histórico)
     movers = []
     for r in rows:
         t = r["ticker"]
@@ -453,16 +477,15 @@ def main():
             movers.append((t, ds, dd))
     movers_sorted = sorted(movers, key=lambda x: abs(x[1]), reverse=True)[:8]
 
-    # Top/Bottom (tabla)
     top = sorted(rows, key=lambda x: x["score"], reverse=True)[:6]
     bottom = sorted(rows, key=lambda x: x["score"])[:6]
 
-    # --------- Build report (Telegram-friendly) ----------
     lines = []
     lines.append(f"📊 *INFORME COMPLETO* ({today})")
     lines.append("")
     lines.append("*— Universo —*")
-    lines.append(f"- Internos (CARTERA_USA): {len(CARTERA_USA)} | Scouting: {len(SCOUTING_EXT)} | Total: {len(rows)} (sin datos: {len(failed)})")
+    # OJO: evitamos underscores para no romper Markdown
+    lines.append(f"- Internos (CARTERA USA): {len(CARTERA_USA)} | Scouting (SCOUTING EXT): {len(SCOUTING_EXT)} | Total: {len(rows)} (sin datos: {len(failed)})")
     lines.append("")
     lines.append("*— Agregado —*")
     lines.append(f"- % sobre MA200: {pct_over200:.0f}% ({len(over200)}/{len(rows)})")
@@ -507,7 +530,6 @@ def main():
 
     send_telegram("\n".join(lines))
 
-    # Mensaje 2: alertas separadas
     if alerts:
         send_telegram("🚨 *ALERTAS*\n\n" + "\n".join(alerts))
 
