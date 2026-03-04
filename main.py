@@ -15,9 +15,6 @@ import yfinance as yf
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# ----------------------------
-# TU CARTERA USA (internos)
-# ----------------------------
 CARTERA_USA = [
     "BAC","PLTR","QBTS","OKLO","RKLB","NBIS","IREN","ZETA",
     "OPEN","EOSE","NVTS","CIFR","NUAI","CAN","ONDS",
@@ -25,9 +22,6 @@ CARTERA_USA = [
     "SATL","IBRX","VG","PRME","ATAI","TMDX","AEHR"
 ]
 
-# ----------------------------
-# SCOUTING EXTERNO
-# ----------------------------
 SCOUTING_EXT = [
     "SOUN","BBAI","AI","INOD","ALKT","DCBO",
     "LUNR","ASTS","SPIR","KTOS","AVAV",
@@ -51,12 +45,8 @@ TZ = ZoneInfo("Europe/Madrid")
 # ============================================================
 
 def _split_markdown_safe(text: str, max_len: int) -> list[str]:
-    """
-    Split text into chunks <= max_len, but never split while inside a ``` code block.
-    """
-    lines = (text or "").splitlines(True)  # keep \n
-    chunks = []
-    buf = ""
+    lines = (text or "").splitlines(True)
+    chunks, buf = [], ""
     in_code = False
 
     def is_fence(line: str) -> bool:
@@ -68,7 +58,6 @@ def _split_markdown_safe(text: str, max_len: int) -> list[str]:
 
         if len(buf) + len(line) > max_len:
             if in_code:
-                # Avoid splitting mid-code block
                 if buf:
                     chunks.append(buf.rstrip("\n"))
                     buf = ""
@@ -82,7 +71,6 @@ def _split_markdown_safe(text: str, max_len: int) -> list[str]:
 
     if buf.strip():
         chunks.append(buf.rstrip("\n"))
-
     return chunks
 
 
@@ -93,9 +81,7 @@ def send_telegram(text: str) -> None:
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     chat_id = str(TELEGRAM_CHAT_ID).strip()
 
-    chunks = _split_markdown_safe(text, MAX_TG_LEN)
-
-    for ch in chunks:
+    for ch in _split_markdown_safe(text, MAX_TG_LEN):
         payload = {
             "chat_id": chat_id,
             "text": ch,
@@ -364,6 +350,15 @@ def mini_card(r: dict) -> str:
         f"   {' | '.join(flags)}"
     )
 
+def arrow_delta(x: float) -> str:
+    if x is None:
+        return ""
+    if x > 0:
+        return "↑"
+    if x < 0:
+        return "↓"
+    return "→"
+
 
 # ============================================================
 # MAIN
@@ -386,28 +381,29 @@ def main():
         return
 
     # Separación: cartera vs scouting
-    rows_cartera = [r for r in rows if r["ticker"] in set(CARTERA_USA)]
-    rows_scout = [r for r in rows if r["ticker"] in set(SCOUTING_EXT)]
+    set_cartera = set(CARTERA_USA)
+    set_scout = set(SCOUTING_EXT)
+    rows_cartera = [r for r in rows if r["ticker"] in set_cartera]
+    rows_scout = [r for r in rows if r["ticker"] in set_scout]
 
     prev = load_last_snapshot()
     append_history(today, rows)
 
-    # Agregados SOLO cartera (para lectura de riesgo/exposición)
+    # Agregados SOLO cartera
     over200 = [r for r in rows_cartera if r["ma200"] and r["close"] > r["ma200"]]
     under200 = [r for r in rows_cartera if r["ma200"] and r["close"] < r["ma200"]]
     ma50_over200 = [r for r in rows_cartera if r["ma50_gt_ma200"]]
     breakouts_cartera = [r for r in rows_cartera if r["breakout_3m"]]
     near200 = [r for r in rows_cartera if r["dist_ma200_pct"] is not None and 0 < r["dist_ma200_pct"] <= NEAR_MA200_PCT]
 
-    # Protección si la cartera estuviera vacía
     denom = max(1, len(rows_cartera))
     pct_over200 = 100.0 * len(over200) / denom
     pct_ma50_over200 = 100.0 * len(ma50_over200) / denom
     avg_score = (sum(r["score"] for r in rows_cartera) / denom) if rows_cartera else 0.0
 
-    # Alertas separadas (cartera)
-    alerts_risk = []     # 🚨 ⚠️ 📉
-    alerts_momo = []     # 🚀
+    # Alertas separadas (solo cartera)
+    alerts_risk = []
+    alerts_momo = []
 
     # Acciones sugeridas SOLO cartera
     reduce = []
@@ -429,7 +425,6 @@ def main():
         if r["breakout_3m"]:
             alerts_momo.append(f"🚀 {t} ruptura 3M")
 
-        # acciones
         if below200 and ma50lt200:
             reduce.append(t)
         elif d200 is not None and 0 <= d200 <= 5:
@@ -437,12 +432,10 @@ def main():
         if r["breakout_3m"] and r["ma50_gt_ma200"] and (r["ma200"] and r["close"] > r["ma200"]):
             opp.append(t)
 
-    # Exposición/régimen (cartera)
-    n_alerts_total = len(alerts_risk)  # penalizamos solo “riesgo”
-    exposure = exposure_continuous(pct_over200, pct_ma50_over200, avg_score, n_alerts_total, denom)
+    exposure = exposure_continuous(pct_over200, pct_ma50_over200, avg_score, len(alerts_risk), denom)
     regime = regime_text(pct_over200, pct_ma50_over200, avg_score)
 
-    # Movers (sobre todo el universo, por si quieres ver scouting también)
+    # Movers (todo el universo)
     movers = []
     for r in rows:
         t = r["ticker"]
@@ -458,52 +451,70 @@ def main():
             movers.append((t, ds, dd))
     movers_sorted = sorted(movers, key=lambda x: abs(x[1]), reverse=True)[:8]
 
-    # Top/Bottom: SOLO cartera (más coherente para gestionar)
+    # Top/Bottom: cartera
     top = sorted(rows_cartera, key=lambda x: x["score"], reverse=True)[:6]
     bottom = sorted(rows_cartera, key=lambda x: x["score"])[:6]
 
-    # Scouting: oportunidades (por score alto o breakout)
+    # Scouting: ideas
     scout_breakouts = [r for r in rows_scout if r["breakout_3m"]]
     scout_top = sorted(rows_scout, key=lambda x: x["score"], reverse=True)[:6]
 
-    # --------- Build report ----------
-    lines = []
-    lines.append(f"📊 *INFORME COMPLETO* ({today})")
-    lines.append("")
-    lines.append("*— Universo —*")
-    lines.append(f"- Internos (CARTERA USA): {len(rows_cartera)} | Scouting (SCOUTING EXT): {len(rows_scout)} | Total: {len(rows)} (sin datos: {len(failed)})")
-    lines.append("")
-    lines.append("*— Agregado (solo cartera) —*")
-    lines.append(f"- % sobre MA200: {pct_over200:.0f}% ({len(over200)}/{denom})")
-    lines.append(f"- % MA50>MA200: {pct_ma50_over200:.0f}% ({len(ma50_over200)}/{denom})")
-    lines.append(f"- Score medio: {avg_score:.0f}/100")
-    lines.append(f"- Breakouts 3M (cartera): {len(breakouts_cartera)} | Cerca MA200 (≤{NEAR_MA200_PCT:.1f}%): {len(near200)} | Bajo MA200: {len(under200)}")
-    lines.append("")
-    lines.append("*— Lectura estratégica (solo cartera) —*")
-    lines.append(f"- Régimen: {regime}")
-    lines.append(f"- Exposición recomendada (semi-cuanti): *{exposure:.0f}%*")
-    if len(under200) >= max(2, int(0.25 * denom)):
-        lines.append("- Lectura: daño estructural relevante (prioridad = proteger y recortar riesgo).")
-    elif len(near200) >= max(2, int(0.20 * denom)):
-        lines.append("- Lectura: varias posiciones en zona crítica (gestionar tamaño / evitar añadir sin confirmación).")
-    else:
-        lines.append("- Lectura: estructura razonable; se puede ser selectivo con adds en setups fuertes.")
-    lines.append("")
-    lines.append("*— Acciones sugeridas (solo cartera) —*")
-    lines.append(f"- Reducir/recortar (bajo MA200 + MA50<MA200): {', '.join(sorted(set(reduce))) if reduce else 'n/a'}")
-    lines.append(f"- Vigilar (0%..+5% sobre MA200): {', '.join(sorted(set(watch))) if watch else 'n/a'}")
-    lines.append(f"- Oportunidades (breakout + MA50>MA200 + sobre MA200): {', '.join(sorted(set(opp))) if opp else 'n/a'}")
+    # ========================================================
+    # BUILD REPORT (diseño mejorado)
+    # ========================================================
 
+    lines = []
+    lines.append(f"📊 *INFORME DIARIO* — {today}")
+    lines.append("")
+
+    # Bloque resumen "dashboard"
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("📦 *Resumen rápido*")
+    lines.append(f"• Universo: *{len(rows)}*  | Cartera: *{len(rows_cartera)}*  | Scouting: *{len(rows_scout)}*  | Sin datos: *{len(failed)}*")
+    lines.append(f"• Régimen (cartera): *{regime}*")
+    lines.append(f"• Exposición sugerida (cartera): *{exposure:.0f}%*")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+
+    # Bloque métricas de estructura
+    lines.append("🧱 *Estructura de cartera*")
+    lines.append(f"• Sobre MA200: *{pct_over200:.0f}%* ({len(over200)}/{denom})")
+    lines.append(f"• MA50 > MA200: *{pct_ma50_over200:.0f}%* ({len(ma50_over200)}/{denom})")
+    lines.append(f"• Score medio: *{avg_score:.0f}/100*")
+    lines.append(f"• Bajo MA200: *{len(under200)}*  | Cerca MA200 (≤{NEAR_MA200_PCT:.1f}%): *{len(near200)}*  | Breakouts 3M: *{len(breakouts_cartera)}*")
+    lines.append("")
+
+    # Lectura estratégica (muy simple)
+    lines.append("🧭 *Lectura estratégica (cartera)*")
+    if len(under200) >= max(2, int(0.25 * denom)):
+        lines.append("• Prioridad: *proteger* (daño estructural relevante).")
+    elif len(near200) >= max(2, int(0.20 * denom)):
+        lines.append("• Prioridad: *controlar riesgo* (varios en zona crítica).")
+    else:
+        lines.append("• Prioridad: *selectivo* (estructura razonable).")
+    lines.append("")
+
+    # Acciones sugeridas (solo cartera)
+    lines.append("🛠️ *Acciones sugeridas (solo cartera)*")
+    lines.append(f"• Reducir/recortar: {', '.join(sorted(set(reduce))) if reduce else 'n/a'}")
+    lines.append(f"• Vigilar (0%..+5% MA200): {', '.join(sorted(set(watch))) if watch else 'n/a'}")
+    lines.append(f"• Oportunidades (setup fuerte): {', '.join(sorted(set(opp))) if opp else 'n/a'}")
+
+    # Movers compactos
     if movers_sorted:
         lines.append("")
-        lines.append("*— Cambios vs última ejecución (score) —*")
+        lines.append("🔁 *Movers vs última ejecución*")
         for t, ds, dd in movers_sorted:
-            dd_txt = f", ΔvsMA200 {dd:+.2f}pp" if dd is not None else ""
-            sign = "+" if ds >= 0 else ""
-            lines.append(f"- {t}: Δscore {sign}{ds:.0f}{dd_txt}")
+            sgn = "+" if ds >= 0 else ""
+            dd_txt = f" | ΔvsMA200 {dd:+.2f}pp" if dd is not None else ""
+            lines.append(f"• {arrow_delta(ds)} *{t}*: Δscore {sgn}{ds:.0f}{dd_txt}")
 
+    # Top / Bottom con explicación simple
     lines.append("")
-    lines.append("*— Top 6 (cartera) —*")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🏆 *Top 6 (cartera)*")
+    lines.append("_Qué significa: los 6 valores con mejor estructura técnica según el score (tendencia + momentum)._")
+    lines.append("")
     if top:
         for r in top:
             lines.append(mini_card(r))
@@ -512,7 +523,9 @@ def main():
         lines.append("n/a")
         lines.append("")
 
-    lines.append("*— Bottom 6 (cartera) —*")
+    lines.append("🧊 *Bottom 6 (cartera)*")
+    lines.append("_Qué significa: los 6 valores con peor estructura; candidatos a vigilancia o reducción si tu tesis se debilita._")
+    lines.append("")
     if bottom:
         for r in bottom:
             lines.append(mini_card(r))
@@ -521,33 +534,39 @@ def main():
         lines.append("n/a")
         lines.append("")
 
-    lines.append("*— Scouting (ideas, no acciones) —*")
+    # Scouting (sección corta)
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🔎 *Scouting (ideas, no acciones)*")
     if scout_breakouts:
         tickers = ", ".join([r["ticker"] for r in sorted(scout_breakouts, key=lambda x: x["score"], reverse=True)[:10]])
-        lines.append(f"- Rupturas 3M: {tickers}")
+        lines.append(f"• Rupturas 3M: {tickers}")
     else:
-        lines.append("- Rupturas 3M: n/a")
+        lines.append("• Rupturas 3M: n/a")
 
     if scout_top:
-        lines.append("- Top 6 scouting por score:")
+        lines.append("• Top 6 scouting por score:")
+        lines.append("")
         for r in scout_top:
             lines.append(mini_card(r))
             lines.append("")
     else:
-        lines.append("- Top 6 scouting por score: n/a")
+        lines.append("• Top 6 scouting por score: n/a")
         lines.append("")
 
     if failed:
-        lines.append("")
-        lines.append("*— Sin datos / error —*")
+        lines.append("━━━━━━━━━━━━━━━━━━━━")
+        lines.append("⚠️ *Sin datos / error*")
         lines.append(", ".join(failed))
 
     send_telegram("\n".join(lines).rstrip())
 
-    # --------- ALERTAS (mensaje separado, con leyenda) ----------
+    # ========================================================
+    # ALERTAS (mensaje separado + leyenda)
+    # ========================================================
+
     alert_lines = []
     if alerts_risk:
-        alert_lines.append("🚨 *ALERTAS (Riesgo / Control — solo cartera)*")
+        alert_lines.append("🚨 *ALERTAS (Riesgo / Control — cartera)*")
         alert_lines.append("_Leyenda: 🚨 bajo MA200 | ⚠️ cerca MA200 | 📉 MA50<MA200_")
         alert_lines.append("")
         alert_lines.extend(alerts_risk)
@@ -555,7 +574,7 @@ def main():
     if alerts_momo:
         if alert_lines:
             alert_lines.append("")
-        alert_lines.append("🚀 *ALERTAS (Momentum — solo cartera)*")
+        alert_lines.append("🚀 *ALERTAS (Momentum — cartera)*")
         alert_lines.append("_Leyenda: 🚀 ruptura de máximos ~3 meses_")
         alert_lines.append("")
         alert_lines.extend(alerts_momo)
