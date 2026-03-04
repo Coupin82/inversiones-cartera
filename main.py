@@ -16,7 +16,7 @@ TICKERS = [
     "BAC","PLTR","QBTS","OKLO","RKLB","NBIS","IREN","ZETA",
     "OPEN","EOSE","NVTS","CIFR","NUAI","CAN","ONDS",
     "SKYT","PL","ADUR","RDW","ASST",
-    "SATL","IBRX","VG","PRME","ATAI","TMDX"
+    "SATL","IBRX","VG","PRME","ATAI","TMDX","AEHR"
 ]
 
 NEAR_MA200_PCT = 2.0          # 0..+2% = “cerca de perder MA200”
