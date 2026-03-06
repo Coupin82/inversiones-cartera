@@ -19,14 +19,15 @@ CARTERA_USA = [
     "BAC","PLTR","QBTS","OKLO","RKLB","NBIS","IREN","ZETA",
     "OPEN","EOSE","NVTS","CIFR","NUAI","CAN","ONDS",
     "SKYT","PL","ADUR","RDW","ASST",
-    "SATL","IBRX","VG","PRME","ATAI","TMDX","AEHR","SOFI",
+    "SATL","IBRX","VG","PRME","TMDX","AEHR","SOFI",
+    "IOVA",
 ]
 
 SCOUTING_EXT = [
     "SOUN","BBAI","AI","INOD","ALKT","DCBO",
     "LUNR","ASTS","SPIR","KTOS","AVAV",
     "ENVX","STEM","RUN","FLNC",
-    "CRNX","IOVA","ARDX","MRSN","SDGR",
+    "CRNX","ARDX","MRSN","SDGR",
     "AMSC","MP","CLSK"
 ]
 
