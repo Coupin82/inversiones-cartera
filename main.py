@@ -16,11 +16,11 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 CARTERA_USA = [
-    "BAC","PLTR","QBTS","OKLO","RKLB","NBIS","IREN","ZETA",
+    "PLTR","QBTS","OKLO","RKLB","NBIS","IREN","ZETA",
     "OPEN","EOSE","NVTS","CIFR","NUAI","CAN","ONDS",
     "SKYT","PL","ADUR","RDW","ASST",
     "SATL","IBRX","VG","PRME","TMDX","AEHR","SOFI",
-    "IOVA",
+    "IOVA","HIMS"
 ]
 
 SCOUTING_EXT = [
