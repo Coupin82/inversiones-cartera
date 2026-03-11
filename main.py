@@ -29,7 +29,8 @@ SCOUTING_EXT = [
     "ENVX","STEM","RUN","FLNC",
     "CRNX","ARDX","MRSN","SDGR",
     "AMSC","MP","CLSK","FLY","LPTH","RCAT"
-    "AVAV","OSS"
+    "AVAV","OSS","CCJ",CEG","SMR","RANI"
+    "UUUU"
 ]
 
 UNIVERSO = sorted(set(CARTERA_USA + SCOUTING_EXT))
